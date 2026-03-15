@@ -1,0 +1,4 @@
+如果uri资源不在gentoo mirror中，比如是github链接，那么第一次尝试从gentoo mirror中并行下载会失败，那么失败后的执行流程是怎样的
+https://deepwiki.com/search/urigentoo-mirrorgithubgentoo-m_fdaa59dc-60d1-4d8e-b6dd-735efd3a1448?mode=deep
+
+https://deepwiki.com/search/gentooebuildfetchcommandwrappe_88bd8b50-1734-4840-bdba-80aba068cdc9?mode=deep

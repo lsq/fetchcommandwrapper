@@ -4,14 +4,15 @@
 # Licensed under GPL v3 or later
 
 import os
+import re
 import sys
 from signal import SIGINT
 from textwrap import dedent
+import traceback
 
 MAX_STREAMS = 5
 ARIA2_COMMAND = "/usr/bin/aria2c"
 VERBOSE = os.getenv("PORTAGE_VERBOSE") == "1"
-
 
 def print_greeting():
     from fetchcommandwrapper.version import VERSION_STR  # noqa: I001
@@ -24,8 +25,8 @@ def parse_parameters():
     USAGE = "\n  %(prog)s [OPTIONS] URI DISTDIR FILE [-- [ARG ..]]"
     EPILOG = dedent("""\
         environment variables:
-          NO_COLOR            Disable use of color (default: auto-detect)
-          PORTAGE_VERBOSE     Enable verbose mode on "1" (default: low verbosity)
+          NO_COLOR              Disable use of color (default: auto-detect)
+          PORTAGE_VERBOSE       Enable verbose mode on "1" (default: low verbosity)
     """)
 
     import argparse  # noqa: I001
@@ -61,6 +62,13 @@ def parse_parameters():
         dest="link_speed_bytes",
         help="specify link speed (bytes per second). enables dropping of slow connections.",
     )
+    parser.add_argument(
+        "--github-proxy",
+        metavar="PROXY_URL",
+        dest="github_proxy",
+        help="use specified proxy for GitHub URLs (e.g., http://proxy.example.com:8080)",
+    )
+
     parser.add_argument("uri", metavar="URI", help=argparse.SUPPRESS)
     parser.add_argument("distdir", metavar="DISTDIR", help=argparse.SUPPRESS)
     parser.add_argument("file_basename", metavar="FILE", help=argparse.SUPPRESS)
@@ -134,11 +142,26 @@ def print_mirror_details(supported_mirror_uris):
             file=sys.stderr,
         )
 
+def is_github_uri(uri):
+    return uri.startswith("https://github.com") or uri.startswith("https://raw.githubusercontent.com")
 
-def make_final_uris(uri, supported_mirror_uris):
+def replace_github_url(url,repUrl=None):
+    # prefix = repUrl if repUrl else 'https://gh-proxy.com'
+    if repUrl is None or repUrl == "" or (not is_github_uri(url)):
+        return url
+
+    return re.sub(
+        r'^https://(raw\.githubusercontent.com|github\.com)/',
+        rf'{repUrl.rstrip('/')}/\1/',
+        url
+    )
+
+
+def make_final_uris(uri, supported_mirror_uris, github_proxy=None):
+    print(f'make_final_uri->uri: {uri}')
     final_uris = [
         uri,
-    ]
+    ] 
     mirrors_involved = False
 
     if not uri.endswith("/distfiles/layout.conf"):
@@ -150,6 +173,7 @@ def make_final_uris(uri, supported_mirror_uris):
                     # mirrror once, at most.
                     # This happens, when a file is not mirrored, e.g. with
                     # sunrise ebuilds.
+                    # traceback.print_stack()
                     print("ERROR: All Gentoo mirrors tried already, exiting.", file=sys.stderr)
                     sys.exit(1)
 
@@ -161,6 +185,10 @@ def make_final_uris(uri, supported_mirror_uris):
 
                 random.shuffle(final_uris)
                 break
+
+    if not mirrors_involved:
+       final_uris = [replace_github_url(url, github_proxy) for url in final_uris]
+       print(f'Use Original URI: final_uris-> {final_uris}')
 
     return final_uris, mirrors_involved
 
@@ -194,9 +222,9 @@ def invoke_aria2(opts, final_uris):
     args.append("--allow-overwrite=true")
     args.append("--max-tries=5")
     args.append("--max-file-not-found=2")
-    args.append("--user-agent=Wget/1.19.1")
-    args.append("--split=%d" % wanted_connections)
-    args.append("--max-connection-per-server=1")
+    args.append('--user-agent="Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0"')
+    args.append("--split=%d" % 16)
+    args.append("--max-connection-per-server=16")
     args.append("--uri-selector=inorder")
     args.append("--follow-metalink=mem")  # e.g. GNOME servers with mirrorbrain
     args.extend(opts.argv_extra)
@@ -228,8 +256,12 @@ def _inner_main():
             sys.exit(1)
 
     supported_mirror_uris = [e for e in gentoo_mirrors() if supported(e)]
+    print(f'supported_mirror_uris: {supported_mirror_uris}')
 
-    final_uris, mirrors_involved = make_final_uris(opts.uri, supported_mirror_uris)
+    # print(f'opts.github_proxy:{opts.github_proxy}')
+    final_uris, mirrors_involved = make_final_uris(opts.uri, supported_mirror_uris, opts.github_proxy)
+    print(f'final_uris: {final_uris}')
+    print(f'mirrors_involved: {mirrors_involved}')
 
     if VERBOSE:
         print_greeting()
@@ -247,7 +279,6 @@ def main():
         _inner_main()
     except KeyboardInterrupt:
         sys.exit(128 + SIGINT)
-
 
 if __name__ == "__main__":
     main()
