@@ -8,11 +8,11 @@ import re
 import sys
 from signal import SIGINT
 from textwrap import dedent
-import traceback
 
 MAX_STREAMS = 5
 ARIA2_COMMAND = "/usr/bin/aria2c"
 VERBOSE = os.getenv("PORTAGE_VERBOSE") == "1"
+
 
 def print_greeting():
     from fetchcommandwrapper.version import VERSION_STR  # noqa: I001
@@ -67,6 +67,12 @@ def parse_parameters():
         metavar="PROXY_URL",
         dest="github_proxy",
         help="use specified proxy for GitHub URLs (e.g., http://proxy.example.com:8080)",
+    )
+    parser.add_argument(
+        "--sourceforge-proxy",
+        metavar="PROXY_URL",
+        dest="sourceforge_proxy",
+        help="use specified proxy for SourceForge URLs (e.g., http://gh-proxy.org/sourceforge)",
     )
 
     parser.add_argument("uri", metavar="URI", help=argparse.SUPPRESS)
@@ -142,53 +148,85 @@ def print_mirror_details(supported_mirror_uris):
             file=sys.stderr,
         )
 
-def is_github_uri(uri):
-    return uri.startswith("https://github.com") or uri.startswith("https://raw.githubusercontent.com")
 
-def replace_github_url(url,repUrl=None):
+def is_github_uri(uri):
+    return uri.startswith("https://github.com") or uri.startswith(
+        "https://raw.githubusercontent.com"
+    )
+
+
+# 预编译正则，避免每次调用时重复编译
+_SOURCEFORGE_PATTERN = re.compile(
+    r"^https://(?:"
+    # 匹配 *.dl.sourceforge.net (如 sf-west-interserver-1.dl.sourceforge.net)
+    r"(?:[\w-]+\.)?dl\.sourceforge\.net"
+    r"|sourceforge\.net"  # 匹配 sourceforge.net 项目页/重定向页
+    r"|downloads\.sourceforge\.net"  # 匹配 downloads.sourceforge.net
+    r")/"
+)
+
+
+def is_sourceforge_uri(uri: str) -> bool:
+    return _SOURCEFORGE_PATTERN.match(uri) is not None
+
+
+def replace_github_url(url, repUrl=None):
     # prefix = repUrl if repUrl else 'https://gh-proxy.com'
     if repUrl is None or repUrl == "" or (not is_github_uri(url)):
         return url
 
     return re.sub(
-        r'^https://(raw\.githubusercontent.com|github\.com)/',
-        rf"{repUrl.rstrip('/')}/\1/",
-        url
+        r"^https://(raw\.githubusercontent.com|github\.com)/", rf"{repUrl.rstrip('/')}/\1/", url
     )
 
 
-def make_final_uris(uri, supported_mirror_uris, github_proxy=None):
-    print(f'make_final_uri->uri: {uri}')
+def replace_sourceforge_url(
+    uri: str, proxy_prefix: str | None = "https://gh-proxy.org/sourceforge"
+) -> str:
+    """为 SourceForge 链接添加 gh-proxy 加速前缀，非 SF 链接原样返回。"""
+    if not proxy_prefix:
+        return uri
+    if _SOURCEFORGE_PATTERN.match(uri):
+        # 确保代理前缀与原始 URI 之间只有一个 /
+        return proxy_prefix.rstrip("/") + "/" + uri.lstrip("/")
+    return uri
+
+
+def make_final_uris(uri, supported_mirror_uris, github_proxy=None, sourceforge_proxy=None):
+    print(f"make_final_uri->uri: {uri}")
     final_uris = [
         uri,
-    ] 
+    ]
     mirrors_involved = False
 
     if not uri.endswith("/distfiles/layout.conf"):
-        for i, mirror_uri in enumerate(supported_mirror_uris):
-            if uri.startswith(mirror_uri):
-                if i != 0:
-                    # Portage calls us for each mirror URI. Therefore we need
-                    # to error out on all but the first one, so we try each
-                    # mirrror once, at most.
-                    # This happens, when a file is not mirrored, e.g. with
-                    # sunrise ebuilds.
-                    # traceback.print_stack()
-                    print("ERROR: All Gentoo mirrors tried already, exiting.", file=sys.stderr)
-                    sys.exit(1)
+        if is_github_uri(uri):
+            final_uris = [replace_github_url(url, github_proxy) for url in final_uris]
+            print(f"Use Original URI: final_uris-> {final_uris}")
+        elif is_sourceforge_uri(uri):
+            final_uris = [replace_sourceforge_url(url, sourceforge_proxy) for url in final_uris]
+            print(f"Use Original URI: final_uris-> {final_uris}")
+        else:
+            for i, mirror_uri in enumerate(supported_mirror_uris):
+                if uri.startswith(mirror_uri):
+                    if i != 0:
+                        # Portage calls us for each mirror URI. Therefore we need
+                        # to error out on all but the first one, so we try each
+                        # mirrror once, at most.
+                        # This happens, when a file is not mirrored, e.g. with
+                        # sunrise ebuilds.
+                        # traceback.print_stack()
+                        print("ERROR: All Gentoo mirrors tried already, exiting.", file=sys.stderr)
+                        sys.exit(1)
 
-                mirrors_involved = True
+                    mirrors_involved = True
 
-                local_part = uri[len(mirror_uri) :]
-                final_uris = [e + local_part for e in supported_mirror_uris]
-                import random
+                    local_part = uri[len(mirror_uri) :]
+                    final_uris = [e + local_part for e in supported_mirror_uris]
+                    import random
 
-                random.shuffle(final_uris)
-                break
-
-    if not mirrors_involved:
-       final_uris = [replace_github_url(url, github_proxy) for url in final_uris]
-       print(f'Use Original URI: final_uris-> {final_uris}')
+                    random.shuffle(final_uris)
+                    break
 
     return final_uris, mirrors_involved
 
@@ -222,7 +260,9 @@ def invoke_aria2(opts, final_uris):
     args.append("--allow-overwrite=true")
     args.append("--max-tries=5")
     args.append("--max-file-not-found=2")
-    args.append('--user-agent="Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0"')
+    args.append(
+        '--user-agent="Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101Firefox/152.0"'
+    )
     args.append("--split=%d" % 16)
     args.append("--max-connection-per-server=16")
     args.append("--uri-selector=inorder")
@@ -256,12 +296,14 @@ def _inner_main():
             sys.exit(1)
 
     supported_mirror_uris = [e for e in gentoo_mirrors() if supported(e)]
-    print(f'supported_mirror_uris: {supported_mirror_uris}')
+    print(f"supported_mirror_uris: {supported_mirror_uris}")
 
     # print(f'opts.github_proxy:{opts.github_proxy}')
-    final_uris, mirrors_involved = make_final_uris(opts.uri, supported_mirror_uris, opts.github_proxy)
-    print(f'final_uris: {final_uris}')
-    print(f'mirrors_involved: {mirrors_involved}')
+    final_uris, mirrors_involved = make_final_uris(
+        opts.uri, supported_mirror_uris, opts.github_proxy, opts.sourceforge_proxy
+    )
+    print(f"final_uris: {final_uris}")
+    print(f"mirrors_involved: {mirrors_involved}")
 
     if VERBOSE:
         print_greeting()
@@ -279,6 +321,7 @@ def main():
         _inner_main()
     except KeyboardInterrupt:
         sys.exit(128 + SIGINT)
+
 
 if __name__ == "__main__":
     main()
